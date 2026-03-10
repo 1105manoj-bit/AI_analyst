@@ -5,7 +5,7 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer
 } from "recharts";
 import "./App.css";
-const GEMINI_API_KEY = "YOUR_GROQ_API_KEY_HERE";// <-- REPLACE THIS
+const GEMINI_API_KEY = "";// <-- REPLACE THIS
 
 const COLORS = ["#00FFB2", "#FF6B6B", "#4ECDC4", "#FFE66D", "#A29BFE", "#FD79A8", "#74B9FF", "#55EFC4"];
 
@@ -202,55 +202,89 @@ const handleQuery = async () => {
   setFallback("");
   setError("");
 
-  const sample = csvData.slice(0, 15);
-const yearAgg = {};
-csvData.forEach(row => {
-  const year = row["Order Date"] ? row["Order Date"].split("-")[2] || row["Order Date"].split("/")[2] : "Unknown";
-  if (!yearAgg[year]) yearAgg[year] = { year, Sales: 0, Profit: 0 };
-  yearAgg[year].Sales += parseFloat(row["Sales"]) || 0;
-  yearAgg[year].Profit += parseFloat(row["Profit"]) || 0;
-});
-const yearSummary = Object.values(yearAgg).sort((a,b) => a.year - b.year);
-  const prompt = `You are a Senior BI Analyst. 
-  
-CSV COLUMNS: ${columns.join(", ")}
-SAMPLE DATA: ${JSON.stringify(sample)}
+  // Pre-aggregate all dimensions from full dataset
+  const segmentAgg = {};
+  csvData.forEach(row => {
+    const seg = row["Segment"];
+    if (!seg) return;
+    if (!segmentAgg[seg]) segmentAgg[seg] = { Segment: seg, Sales: 0, Profit: 0 };
+    segmentAgg[seg].Sales += parseFloat(row["Sales"]) || 0;
+    segmentAgg[seg].Profit += parseFloat(row["Profit"]) || 0;
+  });
+  const segmentSummary = Object.values(segmentAgg).map(r => ({...r, Sales: Math.round(r.Sales), Profit: Math.round(r.Profit)}));
+
+  const regionAgg = {};
+  csvData.forEach(row => {
+    const reg = row["Region"];
+    if (!reg) return;
+    if (!regionAgg[reg]) regionAgg[reg] = { Region: reg, Sales: 0, Profit: 0 };
+    regionAgg[reg].Sales += parseFloat(row["Sales"]) || 0;
+    regionAgg[reg].Profit += parseFloat(row["Profit"]) || 0;
+  });
+  const regionSummary = Object.values(regionAgg).map(r => ({...r, Sales: Math.round(r.Sales), Profit: Math.round(r.Profit)}));
+
+  const categoryAgg = {};
+  csvData.forEach(row => {
+    const cat = row["Category"];
+    if (!cat) return;
+    if (!categoryAgg[cat]) categoryAgg[cat] = { Category: cat, Sales: 0, Profit: 0 };
+    categoryAgg[cat].Sales += parseFloat(row["Sales"]) || 0;
+    categoryAgg[cat].Profit += parseFloat(row["Profit"]) || 0;
+  });
+  const categorySummary = Object.values(categoryAgg).map(r => ({...r, Sales: Math.round(r.Sales), Profit: Math.round(r.Profit)}));
+
+  const shipAgg = {};
+  csvData.forEach(row => {
+    const ship = row["Ship Mode"];
+    if (!ship) return;
+    if (!shipAgg[ship]) shipAgg[ship] = { "Ship Mode": ship, Sales: 0, Profit: 0 };
+    shipAgg[ship].Sales += parseFloat(row["Sales"]) || 0;
+    shipAgg[ship].Profit += parseFloat(row["Profit"]) || 0;
+  });
+  const shipSummary = Object.values(shipAgg).map(r => ({...r, Sales: Math.round(r.Sales), Profit: Math.round(r.Profit)}));
+
+  const yearAgg = {};
+  csvData.forEach(row => {
+    const date = row["Order Date"] || "";
+    const year = date.includes("/") ? date.split("/")[2] : date.split("-")[0];
+    if (!year || year.length !== 4) return;
+    if (!yearAgg[year]) yearAgg[year] = { Year: year, Sales: 0, Profit: 0 };
+    yearAgg[year].Sales += parseFloat(row["Sales"]) || 0;
+    yearAgg[year].Profit += parseFloat(row["Profit"]) || 0;
+  });
+  const yearSummary = Object.values(yearAgg).sort((a,b) => a.Year - b.Year).map(r => ({...r, Sales: Math.round(r.Sales), Profit: Math.round(r.Profit)}));
+
+  const prompt = `You are a BI analyst. Return ONLY a JSON array. No code. No markdown. No explanation.
+
+REAL PRE-AGGREGATED DATA FROM ALL ${csvData.length} ROWS:
+- By Segment: ${JSON.stringify(segmentSummary)}
+- By Region: ${JSON.stringify(regionSummary)}
+- By Category: ${JSON.stringify(categorySummary)}
+- By Ship Mode: ${JSON.stringify(shipSummary)}
+- By Year: ${JSON.stringify(yearSummary)}
 
 USER QUESTION: "${query}"
 
-### MANDATORY PLOTTING RULES:
-1. THE GROUPED VIEW (MULTI-DIMENSIONAL): 
-   - If the user compares two categories (e.g., "Segment" AND "Region"), you MUST create ONE chart, not two.
-   - xKey = Primary Category (e.g., "Region").
-   - yKeys = ALL unique values of the second category as individual keys (e.g., ["Consumer", "Corporate", "Home Office"]).
-   - Data must be pivoted: [{"Region": "South", "Consumer": 25, "Corporate": 20, "Home Office": 15}, ...]
-   
-2. SINGLE DIMENSION: Only use one yKey if they ask for one metric by one category.
+Instructions:
+- Pick the most relevant pre-aggregated data above
+- Use ONLY the exact numbers provided above, do not change them
+- chartType must be: bar, line, pie, or area
+- For pie: xKey is the category field, yKeys is ["Sales"] or ["Profit"]
+- If question cannot be answered with available data, return [{"cannotAnswer": true, "reason": "explanation"}]
 
-3. DATA VALUES: 
-   - Return REAL estimated totals/averages based on the ${csvData.length} rows. 
-   - NEVER return tiny decimals like 0.014 unless the question is specifically about "rate of 1". 
-   - For profit/sales, use whole numbers.
-
-4. CHART TYPE SELECTION:
-   - "bar" for category comparisons (Grouped Bar is preferred).
-   - "line" for dates/trends.
-   - "pie" ONLY for single-metric distributions.
-
-### OUTPUT SCHEMA:
-Return ONLY a JSON array of objects. 
-[{"chartType": "bar", "title": "...", "xKey": "...", "yKeys": ["Key1", "Key2"], "data": [{"xKey": "Value", "Key1": 100, "Key2": 150}], "confidence": 0.9, "reasoning": "..."}]
-
-NO MARKDOWN. NO CONTEXT. NO EXPLAINING WHY YOU PIVOTED.`;
+Return this exact format, nothing else:
+[{"chartType":"pie","title":"Sales by Segment","xKey":"Segment","yKeys":["Sales"],"data":[{"Segment":"Consumer","Sales":1161401},{"Segment":"Corporate","Sales":706146},{"Segment":"Home Office","Sales":429653}],"confidence":0.95,"reasoning":"Pie chart shows proportional distribution"}]`;
 
   try {
     const raw = await askGemini(prompt);
+    console.log("RAW:", raw);
     const parsed = parseJSON(raw);
+    console.log("PARSED:", parsed);
 
     if (!parsed) {
       setError("Failed to parse AI response. Please try a simpler question.");
     } else if (parsed.cannotAnswer || (parsed[0] && parsed[0].cannotAnswer)) {
-      setFallback(parsed.reason || parsed[0].reason || "I can't calculate that with the current data.");
+      setFallback(parsed.reason || parsed[0]?.reason || "I can't answer that with the available data.");
     } else if (Array.isArray(parsed)) {
       setCharts(parsed);
     }
